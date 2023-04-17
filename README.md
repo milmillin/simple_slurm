@@ -1,3 +1,40 @@
+# Simple Slurm (UW Hyak)
+
+A fork from [Simple Slurm](https://github.com/amq92/simple_slurm) with added functionalities for UW Hyak.
+
+```python
+from simple_slurm import parse_hyakalloc, find_best_allocation, Resources
+
+parse_hyakalloc()
+# [
+#   Partition(
+#     account='cse',
+#     partition='gpu-2080ti',
+#     stat=Stat(
+#       free=Resources(cpus=4, memory=43, gpus=2),
+#       used=Resources(cpus=36, memory=320, gpus=6),
+#       total=Resources(cpus=40, memory=363, gpus=8)
+#     )
+#   ),
+#   ...
+# ]
+
+find_best_allocation(Resources(gpus=1))
+# Allocation(
+#   account='realitylab',
+#   partition='gpu-a100',
+#   resources=Resources(cpus=6, memory=124, gpus=1)
+# )
+```
+
+## Installation
+
+```
+git clone git@github.com:milmillin/simple_slurm.git
+cd simple_slurm
+pip install -e .
+```
+
 <h1 align="center">Simple Slurm</h1>
 <p align="center">A simple Python wrapper for Slurm with flexibility in mind<p>
 <p align="center">
