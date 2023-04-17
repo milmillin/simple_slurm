@@ -3,7 +3,7 @@ import datetime
 import math
 import os
 import subprocess
-from typing import Iterable
+from typing import Iterable, Union
 
 IGNORE_BOOLEAN = 'IGNORE_BOOLEAN'
 
@@ -100,7 +100,7 @@ class Slurm():
         result = subprocess.run(cmd, shell=True, check=True)
         return result.returncode
 
-    def sbatch(self, run_cmd: str, convert: bool = True, verbose: bool = True,
+    def sbatch(self, run_cmd: Union[str, list[str]], convert: bool = True, verbose: bool = True,
                sbatch_cmd: str = 'sbatch', shell: str = '/bin/sh') -> int:
         '''Run the sbatch command with all the (previously) set arguments and
         the provided command to in 'run_cmd'.
@@ -119,10 +119,12 @@ class Slurm():
         the '$' should be scaped into '\$'. This behavior is default, set
         'convert' to False to disable it.
         '''
+        if isinstance(run_cmd, str):
+            run_cmd = [run_cmd]
         cmd = '\n'.join((
             sbatch_cmd + ' << EOF',
             self.arguments(shell),
-            run_cmd.replace('$', '\\$') if convert else run_cmd,
+            *(run_cmd_.replace('$', '\\$') if convert else run_cmd_ for run_cmd_ in run_cmd),
             'EOF',
         ))
         result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
