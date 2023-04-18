@@ -3,8 +3,31 @@
 A fork from [Simple Slurm](https://github.com/amq92/simple_slurm) with added functionalities for UW Hyak.
 
 ```python
-from simple_slurm import parse_hyakalloc, find_best_allocation, Resources
+from simple_slurm import parse_hyakalloc, find_best_allocation, find_multiple_allocations, Constraints
 
+# Allocate exact number of gpus and find optimal allocations for cpus and memory.
+# It internally calls hyakalloc and prefers ones that are available now.
+find_best_allocation(Constraint(gpus=1))
+# Allocation(
+#   account='realitylab',
+#   partition='gpu-a100',
+#   resources=Resources(cpus=6, memory=124, gpus=1)
+# )
+
+# You can also add minimum cpus and memory constraints.
+find_best_allocation(Constraint(cpus=1, memory=8, gpus=1))
+
+# Schedule n jobs each with the same estimated_time (in hr).
+# It internally simulates when the resources are used and freed through time.
+find_multiple_allocations(n=5, estimated_time=2, Constraint(gpus=1))
+# estimated_eta: 3.00
+# [
+#   Allocation(...),
+#   Allocation(...),
+#   ...
+# ]
+
+# You can do your own calculation from the parsed hyakalloc.
 parse_hyakalloc()
 # [
 #   Partition(
@@ -18,13 +41,6 @@ parse_hyakalloc()
 #   ),
 #   ...
 # ]
-
-find_best_allocation(Resources(gpus=1))
-# Allocation(
-#   account='realitylab',
-#   partition='gpu-a100',
-#   resources=Resources(cpus=6, memory=124, gpus=1)
-# )
 ```
 
 ## Installation

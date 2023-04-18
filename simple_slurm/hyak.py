@@ -5,10 +5,12 @@ import math
 ACCOUNT_SCORE = {"cse": 1.0, "realitylab": 1.0, "stf": 1.0}
 
 PARTITION_SCORE = {
-    "gpu-a100": 1.0,
+    "gpu-a100": 0.99,
     "gpu-a40": 0.95,
     "gpu-2080ti": 0.8,
     "gpu-rtx6k": 0.8,
+    "compute": 1.0,  # cpu only jobs would prefer these partitions
+    "compute-hugemem": 1.0,
 }
 
 CPU_GPU_FALLOFF = 2  # allow 2 cpus per gpu less than average
@@ -260,10 +262,7 @@ def compute_score(partition: Partition, constraint: Constraint = Constraint()) -
 
         return (score - 0.5) * partition_score + 1.5
     else:
-        return (
-            partition_score * (free.cpus / total.cpus) * (free.memory / total.memory)
-            + 1.0
-        )
+        return partition_score + 1.0
 
 
 def _compute_scores(partitions: list[Partition], constraint: Constraint) -> list[float]:
@@ -325,7 +324,7 @@ PARTITION_TIME_SCALE = {
     "gpu-rtx6k": 1.2,
 }
 
-TIME_UNTIL_FREE = 8  # assume currently used gpu will be free in 8 hours
+TIME_UNTIL_FREE = 24  # assume currently used gpu will be free in 24 hours
 
 
 def find_multiple_allocations(
@@ -350,6 +349,7 @@ def find_multiple_allocations(
     # fill up free spaces
     current_time = 1.0
     allocations = []
+    estimated_eta = 0.0
     while len(allocations) < n:
         while max(_compute_scores(partitions, constraint)) < TOLERABLE_SCORE:
             if len(events) == 0:
@@ -367,7 +367,10 @@ def find_multiple_allocations(
         allocations.append(best_alloc)
         partitions = [partition.subtract(best_alloc) for partition in partitions]
         time_scale = PARTITION_TIME_SCALE.get(best_alloc.partition, 1.5)
-        events.append((time_scale * estimated_hours, best_alloc))
+        eta = current_time + time_scale * estimated_hours
+        events.append((eta, best_alloc))
         events = sorted(events, key=lambda x: x[0])
+        estimated_eta = max(estimated_eta, eta)
 
+    print(f"estimated_eta: {estimated_eta:.2f}")
     return allocations
