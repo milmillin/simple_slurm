@@ -1,4 +1,4 @@
-from typing import Dict, Any, NamedTuple
+from typing import Dict, Any, NamedTuple, Optional
 import subprocess
 import math
 
@@ -17,6 +17,8 @@ MEM_GPU_FALLOFF = 16  # allow 16 GB per gpu less than average
 DEFAULT_MIN_CPU = 1
 DEFAULT_MIN_MEMORY = 8
 DEFAULT_MIN_GPU = 0
+
+TOLERABLE_SCORE = 1.25
 
 
 def compute_logistic_constant(falloff: float, cutoff: float = 0.9) -> float:
@@ -73,9 +75,26 @@ def call_function(cmd: str) -> str:
 
 
 class Resources(NamedTuple):
+    cpus: int
+    memory: int
+    gpus: int
+
+    def subtract(self, other: "Resources") -> "Resources":
+        return Resources(
+            self.cpus - other.cpus, self.memory - other.memory, self.gpus - other.gpus
+        )
+
+    def add(self, other: "Resources") -> "Resources":
+        return Resources(
+            self.cpus + other.cpus, self.memory + other.memory, self.gpus + other.gpus
+        )
+
+
+class Constraint(NamedTuple):
     cpus: int = DEFAULT_MIN_CPU
     memory: int = DEFAULT_MIN_MEMORY
     gpus: int = DEFAULT_MIN_GPU
+    allowed_partitions: Optional[list[str]] = None
 
 
 class Stat(NamedTuple):
@@ -83,31 +102,68 @@ class Stat(NamedTuple):
     used: Resources
     total: Resources
 
+    def subtract(self, resources: Resources) -> "Stat":
+        return Stat(self.free.subtract(resources), self.used.add(resources), self.total)
 
-class Partition(NamedTuple):
-    account: str
-    partition: str
-    stat: Stat
-
-    def free_satisfies(self, constraint: Resources) -> bool:
-        return (
-            self.stat.free.cpus >= constraint.cpus
-            and self.stat.free.memory >= constraint.memory
-            and self.stat.free.gpus >= constraint.gpus
-        )
-
-    def total_satisfies(self, constraint: Resources) -> bool:
-        return (
-            self.stat.total.cpus >= constraint.cpus
-            and self.stat.total.memory >= constraint.memory
-            and self.stat.total.gpus >= constraint.gpus
-        )
+    def add(self, resources: Resources) -> "Stat":
+        return Stat(self.free.add(resources), self.used.subtract(resources), self.total)
 
 
 class Allocation(NamedTuple):
     account: str
     partition: str
     resources: Resources
+    score: float
+
+
+class Partition(NamedTuple):
+    account: str
+    partition: str
+    stat: Stat
+
+    def free_satisfies(self, constraint: Constraint) -> bool:
+        if (
+            constraint.allowed_partitions is not None
+            and self.partition not in constraint.allowed_partitions
+        ):
+            return False
+        return (
+            self.stat.free.cpus >= constraint.cpus
+            and self.stat.free.memory >= constraint.memory
+            and self.stat.free.gpus >= constraint.gpus
+        )
+
+    def total_satisfies(self, constraint: Constraint) -> bool:
+        if (
+            constraint.allowed_partitions is not None
+            and self.partition not in constraint.allowed_partitions
+        ):
+            return False
+        return (
+            self.stat.total.cpus >= constraint.cpus
+            and self.stat.total.memory >= constraint.memory
+            and self.stat.total.gpus >= constraint.gpus
+        )
+
+    def subtract(self, allocation: Allocation) -> "Partition":
+        if (
+            self.account == allocation.account
+            and self.partition == allocation.partition
+        ):
+            return Partition(
+                self.account, self.partition, self.stat.subtract(allocation.resources)
+            )
+        return self
+
+    def add(self, allocation: Allocation) -> "Partition":
+        if (
+            self.account == allocation.account
+            and self.partition == allocation.partition
+        ):
+            return Partition(
+                self.account, self.partition, self.stat.add(allocation.resources)
+            )
+        return self
 
 
 def parse_hyakalloc() -> list[Partition]:
@@ -166,7 +222,7 @@ def parse_hyakalloc() -> list[Partition]:
     return partitions
 
 
-def compute_score(partition: Partition, constraint: Resources = Resources()) -> float:
+def compute_score(partition: Partition, constraint: Constraint = Constraint()) -> float:
     """
     Compute a score for a given partition (higher is better).
 
@@ -174,8 +230,8 @@ def compute_score(partition: Partition, constraint: Resources = Resources()) -> 
     Else if it does not satisfy the constraint now, returns (0, 1]
     Else, returns (1, 2].
 
-    If one or more gpus are requested, a partition with a score of >=1.25 will give you
-    optimal resources within the defined FALLOFF.
+    If one or more gpus are requested, a partition with a score of >=TOLERABLE_SCORE
+    will give you optimal resources within the defined FALLOFF.
     """
 
     if not partition.total_satisfies(constraint):
@@ -210,9 +266,14 @@ def compute_score(partition: Partition, constraint: Resources = Resources()) -> 
         )
 
 
-def find_best_allocation(constraint: Resources = Resources()) -> Allocation:
-    partitions = parse_hyakalloc()
-    scores = [compute_score(partition, constraint) for partition in partitions]
+def _compute_scores(partitions: list[Partition], constraint: Constraint) -> list[float]:
+    return [compute_score(partition, constraint) for partition in partitions]
+
+
+def _find_best_allocation(
+    partitions: list[Partition], constraint: Constraint
+) -> Allocation:
+    scores = _compute_scores(partitions, constraint)
 
     partition_score_pairs = sorted(
         zip(partitions, scores), key=lambda ps: ps[1], reverse=True
@@ -227,6 +288,7 @@ def find_best_allocation(constraint: Resources = Resources()) -> Allocation:
             best_partition.account,
             best_partition.partition,
             Resources(constraint.cpus, constraint.memory, gpus=0),
+            best_score,
         )
 
     # with gpus; compute optimal cpu/mem usage
@@ -237,7 +299,7 @@ def find_best_allocation(constraint: Resources = Resources()) -> Allocation:
         constraint.gpus * (total.memory // total.gpus), constraint.memory
     )
 
-    if best_score >= 1.25:
+    if best_score >= TOLERABLE_SCORE:
         # free now with acceptable tolerance; allocate min(free, optimal)
         optimal_cpus = min(free.cpus, optimal_cpus)
         optimal_memory = min(free.memory, optimal_memory)
@@ -247,4 +309,65 @@ def find_best_allocation(constraint: Resources = Resources()) -> Allocation:
         best_partition.account,
         best_partition.partition,
         Resources(optimal_cpus, optimal_memory, constraint.gpus),
+        best_score,
     )
+
+
+def find_best_allocation(constraint: Constraint = Constraint()) -> Allocation:
+    partitions = parse_hyakalloc()
+    return _find_best_allocation(partitions, constraint)
+
+
+PARTITION_TIME_SCALE = {
+    "gpu-a100": 0.5,  # a100 is roughly twice as fast
+    "gpu-a40": 1.0,
+    "gpu-2080ti": 1.2,
+    "gpu-rtx6k": 1.2,
+}
+
+TIME_UNTIL_FREE = 8  # assume currently used gpu will be free in 8 hours
+
+
+def find_multiple_allocations(
+    n: int, estimated_hours: float, constraint: Constraint = Constraint()
+) -> list[Allocation]:
+    partitions = parse_hyakalloc()
+
+    EVENT = tuple[float, Allocation]
+    # list of time and which allocations will be free
+    events: list[EVENT] = []
+    for partition in partitions:
+        time_scale = PARTITION_TIME_SCALE.get(partition.partition, 1.5)
+        events.append(
+            (
+                time_scale * TIME_UNTIL_FREE,
+                Allocation(
+                    partition.account, partition.partition, partition.stat.used, -1.0
+                ),
+            )
+        )
+
+    # fill up free spaces
+    current_time = 1.0
+    allocations = []
+    while len(allocations) < n:
+        while max(_compute_scores(partitions, constraint)) < TOLERABLE_SCORE:
+            if len(events) == 0:
+                raise ValueError("cannot satisfy constraint")
+            current_time = events[0][0]
+            upto = len(events)
+            for i, (t, alloc) in enumerate(events):
+                if t > current_time:
+                    upto = i
+                    break
+                # free up alloc
+                partitions = [partition.add(alloc) for partition in partitions]
+            events = events[upto:]
+        best_alloc = _find_best_allocation(partitions, constraint)
+        allocations.append(best_alloc)
+        partitions = [partition.subtract(best_alloc) for partition in partitions]
+        time_scale = PARTITION_TIME_SCALE.get(best_alloc.partition, 1.5)
+        events.append((time_scale * estimated_hours, best_alloc))
+        events = sorted(events, key=lambda x: x[0])
+
+    return allocations
