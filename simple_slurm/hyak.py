@@ -3,7 +3,7 @@ import subprocess
 import math
 from datetime import datetime, timedelta
 from queue import PriorityQueue
-import os
+import os, sys
 
 ACCOUNT_SCORE = {"cse": 1.0, "realitylab": 1.0, "stf": 1.0}
 
@@ -84,16 +84,22 @@ def _escape_quote(cmd: str) -> str:
     return cmd.translate(_ESCAPE_QUOTE_TRANS)
 
 
-def call_function(cmd: str, remote: bool = False) -> str:
-    if remote:
+def call_function(cmd: str, use_ssh: bool = False) -> str:
+    if use_ssh:
         run = subprocess.run(
             f'ssh -o "StrictHostKeychecking no" localhost "{_escape_quote(cmd)}"',
+            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
     else:
         run = subprocess.run(
             cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    if run.returncode != 0:
+        raise SystemError(
+            f"Subprocess {cmd} has non-zero return code:\n\n"
+            + run.stderr.decode("utf-8").strip()
         )
     return run.stdout.decode("utf-8").strip()
 
@@ -193,11 +199,11 @@ class Partition(NamedTuple):
         return (self.account, self.partition)
 
 
-def parse_hyakalloc() -> list[Partition]:
+def parse_hyakalloc(use_ssh=False) -> list[Partition]:
     """
     Parse the output of hyakalloc.
     """
-    run_result = call_function("hyakalloc")
+    run_result = call_function("hyakalloc", use_ssh)
 
     START_ROW = "╭"
     END_ROW = "╰"
@@ -292,12 +298,15 @@ def parse_tres(tres: str) -> Resources:
     )
 
 
-def parse_squeue(accounts: Optional[list[str]]) -> list[QueueEntry]:
+def parse_squeue(
+    accounts: Optional[list[str]], use_ssh: bool = False
+) -> list[QueueEntry]:
     acc = ""
     if accounts is not None:
         acc = " -A " + ",".join(accounts)
     output = call_function(
-        f"squeue{acc} -h -t PD,R -O Account,Partition,SubmitTime,TimeLimit,EndTime,StateCompact,tres-alloc:70"
+        f"squeue{acc} -h -t PD,R -O Account,Partition,SubmitTime,TimeLimit,EndTime,StateCompact,tres-alloc:70",
+        use_ssh,
     )
     entries = output.split("\n")
     qentries = []
@@ -416,8 +425,10 @@ def _find_best_allocation(
     )
 
 
-def find_best_allocation(constraint: Constraint = Constraint()) -> Allocation:
-    partitions = parse_hyakalloc()
+def find_best_allocation(
+    constraint: Constraint = Constraint(), use_ssh: bool = False
+) -> Allocation:
+    partitions = parse_hyakalloc(use_ssh)
     return _find_best_allocation(partitions, constraint)
 
 
@@ -438,8 +449,9 @@ def find_multiple_allocations(
         float, timedelta, dict[str, float], dict[str, timedelta]
     ],
     constraint: Constraint = Constraint(),
+    use_ssh: bool = False,
 ) -> list[Allocation]:
-    partitions = parse_hyakalloc()
+    partitions = parse_hyakalloc(use_ssh)
 
     partition_map = {p._key(): p for p in partitions}
 
@@ -539,7 +551,7 @@ def find_multiple_allocations(
     return allocations
 
 
-def requeue_me(remote: bool = True):
+def requeue_me(use_ssh: bool = True) -> bool:
     # find job id
     array_job_id = os.getenv("SLURM_ARRAY_JOB_ID")
     if array_job_id is not None:
@@ -549,4 +561,9 @@ def requeue_me(remote: bool = True):
         job_id = os.environ["SLURM_JOB_ID"]
 
     cmd = f"scontrol requeue {job_id}"
-    call_function(cmd, remote)
+    try:
+        call_function(cmd, use_ssh)
+        return True
+    except Exception as e:
+        print(repr(e), file=sys.stderr)
+        return False
