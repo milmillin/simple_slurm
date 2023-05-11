@@ -3,6 +3,7 @@ import subprocess
 import math
 from datetime import datetime, timedelta
 from queue import PriorityQueue
+import os
 
 ACCOUNT_SCORE = {"cse": 1.0, "realitylab": 1.0, "stf": 1.0}
 
@@ -72,9 +73,28 @@ def logistic(x: float, x0: float, k: float) -> float:
 CPU_GPU_K = compute_logistic_constant(CPU_GPU_FALLOFF)
 MEM_GPU_K = compute_logistic_constant(MEM_GPU_FALLOFF)
 
+_ESCAPE_QUOTE_TRANS = str.maketrans({'"': '\\"', "\\": "\\\\"})
 
-def call_function(cmd: str) -> str:
-    run = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
+
+def _escape_quote(cmd: str) -> str:
+    """
+    echo "abcd def" -> echo \"abcd def \"
+    echo "abcd \"def\"" -> echo \"abcd \\\"def\\\"\"
+    """
+    return cmd.translate(_ESCAPE_QUOTE_TRANS)
+
+
+def call_function(cmd: str, remote: bool = False) -> str:
+    if remote:
+        run = subprocess.run(
+            f'ssh -o "StrictHostKeychecking no" localhost "{_escape_quote(cmd)}"',
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    else:
+        run = subprocess.run(
+            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
     return run.stdout.decode("utf-8").strip()
 
 
@@ -517,3 +537,16 @@ def find_multiple_allocations(
     eta_delta_str = str(estimated_eta - original_time)
     print(f"estimated_eta: {eta_str} (in {eta_delta_str})")
     return allocations
+
+
+def requeue_me(remote: bool = True):
+    # find job id
+    array_job_id = os.getenv("SLURM_ARRAY_JOB_ID")
+    if array_job_id is not None:
+        array_task_id = os.environ["SLURM_ARRAY_TASK_ID"]
+        job_id = f"{array_job_id}_{array_task_id}"
+    else:
+        job_id = os.environ["SLURM_JOB_ID"]
+
+    cmd = f"scontrol requeue {job_id}"
+    call_function(cmd, remote)
